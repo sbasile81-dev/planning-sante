@@ -110,34 +110,58 @@ def calculer_planning(annee, mois, nb_equipes):
         dt = date(annee, mois, j)
         sem_key = f"Semaine {dt.isocalendar()[1]}"
         is_we = dt.weekday() >= 5
-        id_g = ((j - 1) % nb_equipes) + 1
-        id_r = ((j - 2) % nb_equipes) + 1 if j > 1 else nb_equipes
-        id_reprise = ((j - 3) % nb_equipes) + 1
-
+        
+        # 1. LOGIQUE ANTI-TROU NOIR : Trouver l'équipe de garde réelle
+        id_g_theorique = ((j - 1) % nb_equipes) + 1
+        id_g_reel = None
+        
+        # On teste les équipes pour trouver celle qui n'est pas totalement en congé
+        for offset in range(nb_equipes):
+            test_id = ((id_g_theorique - 1 + offset) % nb_equipes) + 1
+            membres_test = st.session_state.composition.get(f"{u_active}_{test_id}", [])
+            
+            # Une équipe est valide si elle a au moins un agent présent
+            presents = [n for n in membres_test if not any(c['agent'] == n and c['debut'] <= dt <= c['fin'] for c in st.session_state.conges)]
+            
+            if presents:
+                id_g_reel = test_id
+                break
+        
+        # 2. ATTRIBUTION POUR CHAQUE AGENT DANS CHAQUE ÉQUIPE
         for e_id in range(1, nb_equipes + 1):
             membres = st.session_state.composition.get(f"{u_active}_{e_id}", [])
+            
             for n in membres:
-                if n not in heures_hebdo: heures_hebdo[n] = {}
+                # Initialisation des heures pour l'agent
+                if n not in heures_hebdo: 
+                    heures_hebdo[n] = {}
                 if sem_key not in heures_hebdo[n]:
-                    # Injection de la mémoire si on est en début de mois
                     report = st.session_state.get('memoire_heures', {}).get(cle_prec, {}).get(n, 0)
                     heures_hebdo[n][sem_key] = report if j <= 7 else 0
 
+                # --- ORDRE DES PRIORITÉS ---
+                
+                # PRIORITÉ 1 : CONGÉ
                 if any(c['agent'] == n and c['debut'] <= dt <= c['fin'] for c in st.session_state.conges):
                     planning_temp[(n, j)] = {"type": "Congé", "heures": 0}
-                    continue
-
-                if e_id == id_g: 
+                
+                # PRIORITÉ 2 : GARDE (Si l'équipe a été choisie par la logique anti-trou noir)
+                elif e_id == id_g_reel:
                     planning_temp[(n, j)] = {"type": "Garde", "heures": 0}
-                elif e_id == id_r: 
-                    # Uniquement J+1
+                
+                # PRIORITÉ 3 : REPOS (Si l'agent était de garde la veille)
+                elif j > 1 and planning_temp.get((n, j-1), {}).get("type") == "Garde":
                     planning_temp[(n, j)] = {"type": "Repos", "heures": 0}
+                
+                # PRIORITÉ 4 : SERVICE NORMAL (Journée ou Week-end)
                 else:
                     if is_we:
+                        # Reprise J+3
+                        id_reprise = ((j - 3) % nb_equipes) + 1
                         if e_id == id_reprise or heures_hebdo[n][sem_key] < 35:
                             planning_temp[(n, j)] = {"type": "Week-end", "heures": 5}
                             heures_hebdo[n][sem_key] += 5
-                        else: 
+                        else:
                             planning_temp[(n, j)] = {"type": "", "heures": 0} # Libre
                     else:
                         planning_temp[(n, j)] = {"type": "Journée", "heures": 10}
@@ -145,16 +169,16 @@ def calculer_planning(annee, mois, nb_equipes):
 
     # Lissage (Identique mais sauvegarde la fin de mois)
     for n, semaines in heures_hebdo.items():
-        for sem_key, total in semaines.items():
+         for sem_key, total in semaines.items():
             if total > 40:
                 for j in range(1, jours_dans_mois + 1):
-                    dt = date(annee, mois, j)
-                    if f"Semaine {dt.isocalendar()[1]}" == sem_key:
-                        if planning_temp.get((n, j), {}).get("type") == "Journée":
-                            planning_temp[(n, j)] = {"type": "Demi-journée", "heures": 5}
-                            heures_hebdo[n][sem_key] -= 5
-                            if heures_hebdo[n][sem_key] <= 40: break
-
+                        dt = date(annee, mois, j)
+                if f"Semaine {dt.isocalendar()[1]}" == sem_key:
+                    if planning_temp.get((n, j), {}).get("type") == "Journée":
+                        planning_temp[(n, j)] = {"type": "Demi-journée", "heures": 5}
+                        heures_hebdo[n][sem_key] -= 5
+                        if heures_hebdo[n][sem_key] <= 40: break
+                            
     # Enregistrement pour le mois suivant
     derniere_sem = f"Semaine {date(annee, mois, jours_dans_mois).isocalendar()[1]}"
     cle_actuelle = f"{annee}_{mois}"
@@ -339,3 +363,4 @@ with t5:
                 if n:
                     st.session_state.base_agents.append({"nom":n,"emploi":e,"matricule":m})
                     sauvegarder_donnees(); st.rerun()
+
