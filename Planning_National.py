@@ -106,30 +106,44 @@ def calculer_planning(annee, mois, nb_equipes):
     date_prec = date(annee, mois, 1) - timedelta(days=1)
     cle_prec = f"{date_prec.year}_{date_prec.month}"
 
-# --- LOGIQUE V9 : DEUX PASSES (Garantie de substitution et lissage) ---
+# --- LOGIQUE DE ROTATION ET LISSAGE (VERSION FINALE OPTIMISÉE) ---
     index_rotation = 0
     toutes_les_gardes = {} 
 
-    # PASSE 1 : POSITIONNEMENT DES GARDES DU MOIS (Inviolable)
-    # On fixe les gardes d'abord pour savoir qui remplace qui avant de compter les heures.
+    # PASSE 1 : POSITIONNEMENT DES GARDES DU MOIS (Gestion stricte des absences)
     for j in range(1, jours_dans_mois + 1):
         dt = date(annee, mois, j)
-        tentatives = 0
-        while tentatives < nb_equipes:
-            test_idx = (index_rotation + tentatives) % nb_equipes
+        
+        # On ne cherche pas une équipe par "tentative" limitée, 
+        # mais on cherche la PROCHAINE équipe disponible dans l'ordre.
+        trouve = False
+        decalage = 0
+        
+        while not trouve:
+            # On calcule l'ID de l'équipe à tester selon l'index actuel + décalage de recherche
+            test_idx = (index_rotation + decalage) % nb_equipes
             test_id = test_idx + 1
+            
             membres_test = st.session_state.composition.get(f"{u_active}_{test_id}", [])
             
-            # Vérification de présence (Anti-trou noir pour SENI le 10)
+            # Une équipe est disponible si au moins un membre n'est pas en congé ce jour-là
             presents = [n for n in membres_test if not any(c['agent'] == n and c['debut'] <= dt <= c['fin'] for c in st.session_state.conges)]
             
             if presents:
+                # Équipe disponible : on lui donne la garde et on avance l'index permanent
                 toutes_les_gardes[j] = test_id
                 index_rotation = (test_idx + 1) % nb_equipes
-                break
-            tentatives += 1
+                trouve = True
+            else:
+                # Équipe totalement absente (ex: SENI seul) : on passe à la suivante
+                # sans incrémenter l'index_rotation pour que son tour soit préservé à son retour.
+                decalage += 1
+                # Sécurité pour éviter une boucle infinie si tout le monde est absent
+                if decalage >= nb_equipes:
+                    toutes_les_gardes[j] = None
+                    trouve = True
 
-    # PASSE 2 : ATTRIBUTION DES TÂCHES ET LISSAGE RÉEL
+    # PASSE 2 : ATTRIBUTION DES TÂCHES ET LISSAGE RÉALISTE
     for j in range(1, jours_dans_mois + 1):
         dt = date(annee, mois, j)
         sem_key = f"Semaine {dt.isocalendar()[1]}"
@@ -171,7 +185,7 @@ def calculer_planning(annee, mois, nb_equipes):
                 h_actuelles = heures_hebdo[n][sem_key]
                 
                 if is_we:
-                    # Week-end : uniquement pour payer la dette (moins de 35h)
+                    # Logique : Week-end pour payer la dette (moins de 35h)
                     if h_actuelles < 35:
                         h_paye = min(10, 35 - h_actuelles)
                         planning_temp[(n, j)] = {"type": "Week-end", "heures": h_paye}
