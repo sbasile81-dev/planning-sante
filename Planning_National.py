@@ -101,43 +101,34 @@ def sauvegarder_donnees():
 def calculer_planning(annee, mois, nb_equipes):
     import calendar
     from datetime import date
-
     jours_dans_mois = calendar.monthrange(annee, mois)[1]
     u_active = st.session_state.config.get('unite_active', 'Unité de Soins')
-
+    
     heures_hebdo = {}
     planning_temp = {}
     toutes_les_gardes = {}
-    index_rotation = st.session_state.get('last_index', 0)
+    index_rotation = st.session_state.get('last_index', 0) 
 
-    # Structure pour stocker les attributions par agent et par semaine, avant ajustement
-    semaine_attributions = {}  # { agent: { sem_key: [(j, type, heures)] } }
-
-    # --- PASSE 1 : AFFECTATION DES GARDES (sans répétition) ---
-    derniere_equipe_garde = None
+    # --- PASSE 1 : ATTRIBUTION DES GARDES ---
     for j in range(1, jours_dans_mois + 1):
         dt = date(annee, mois, j)
+        decalage = 0
         trouve = False
-        for decalage in range(nb_equipes):
+        while not trouve and decalage < nb_equipes:
             test_id = ((index_rotation + decalage) % nb_equipes) + 1
-            if derniere_equipe_garde is not None and test_id == derniere_equipe_garde:
-                continue
             membres_test = st.session_state.composition.get(f"{u_active}_{test_id}", [])
-            presents = [n for n in membres_test if not any(
-                c['agent'] == n and c['debut'] <= dt <= c['fin']
-                for c in st.session_state.conges
-            )]
+            # Uniquement ceux qui ne sont pas en congé
+            presents = [n for n in membres_test if not any(c['agent'] == n and c['debut'] <= dt <= c['fin'] for c in st.session_state.conges)]
+            
             if presents:
                 toutes_les_gardes[j] = test_id
-                derniere_equipe_garde = test_id
                 index_rotation = (test_id % nb_equipes)
                 trouve = True
-                break
-        if not trouve:
-            toutes_les_gardes[j] = None
-            derniere_equipe_garde = None
+            else:
+                decalage += 1
+        if not trouve: toutes_les_gardes[j] = None
 
-    # --- PASSE 2 : DISTRIBUTION AVEC REPRISE J+2, MAIS SANS CONTRAINTE STRICTE DE 40H ---
+    # --- PASSE 2 : SERVICE ET LISSAGE "ZÉRO REPOS ORDINAIRE" ---
     for j in range(1, jours_dans_mois + 1):
         dt = date(annee, mois, j)
         sem_key = f"Sem {dt.isocalendar()[1]}"
@@ -147,123 +138,52 @@ def calculer_planning(annee, mois, nb_equipes):
         for e_id in range(1, nb_equipes + 1):
             membres = st.session_state.composition.get(f"{u_active}_{e_id}", [])
             for n in membres:
-                # Initialisation du compteur hebdomadaire provisoire
-                if n not in heures_hebdo:
-                    heures_hebdo[n] = {}
+                if n not in heures_hebdo: heures_hebdo[n] = {}
                 if sem_key not in heures_hebdo[n]:
+                    # Récupération du report (mémoire) uniquement en début de mois
                     report = st.session_state.get('memoire_heures', {}).get(n, 0)
                     heures_hebdo[n][sem_key] = report if j <= 7 else 0
 
-                cur_h = heures_hebdo[n][sem_key]  # cumul provisoire (peut dépasser)
-                h_disponibles = 40 - cur_h
+                cur_h = heures_hebdo[n][sem_key]
+                h_dispo = 40 - cur_h
 
-                # --- Hiérarchie des priorités ---
-                # 1. Congé
+                # --- CAS 1 : PRIORITÉS ABSOLUES ---
+                # Congé
                 if any(c['agent'] == n and c['debut'] <= dt <= c['fin'] for c in st.session_state.conges):
                     planning_temp[(n, j)] = {"type": "Congé", "heures": 0}
                     continue
-
-                # 2. Repos obligatoire après garde (J+1)
-                jour_prec = planning_temp.get((n, j-1))
-                if jour_prec and jour_prec.get("type") == "Garde":
-                    planning_temp[(n, j)] = {"type": "Repos", "heures": 0}
-                    continue
-
-                # 3. Garde
+                # Garde (0h dans le quota 40h)
                 if e_id == id_equipe_de_garde:
                     planning_temp[(n, j)] = {"type": "Garde", "heures": 0}
                     continue
-
-                # 4. Reprise obligatoire J+2 (après un repos)
-                if jour_prec and jour_prec.get("type") in ("Repos", "Repos Lissage"):
-                    # On force une attribution, même si cela dépasse 40h
-                    # On privilégie 10h si possible, sinon 5h
-                    if h_disponibles >= 10:
-                        planning_temp[(n, j)] = {"type": "Journée", "heures": 10}
-                        heures_hebdo[n][sem_key] += 10
-                    else:
-                        planning_temp[(n, j)] = {"type": "Demi-journée", "heures": 5}
-                        heures_hebdo[n][sem_key] += 5
+                # Repos J+1 (Obligatoire après garde)
+                if planning_temp.get((n, j-1), {}).get("type") == "Garde":
+                    planning_temp[(n, j)] = {"type": "Repos", "heures": 0}
                     continue
 
-                # 5. Service normal (semaine)
+                # --- CAS 2 : JOURS DE SEMAINE (SERVICE OBLIGATOIRE) ---
                 if not is_we:
-                    if h_disponibles >= 10:
+                    if h_dispo >= 10:
                         planning_temp[(n, j)] = {"type": "Journée", "heures": 10}
                         heures_hebdo[n][sem_key] += 10
-                    elif h_disponibles > 0:
+                    elif h_dispo >= 5:
                         planning_temp[(n, j)] = {"type": "Demi-journée", "heures": 5}
                         heures_hebdo[n][sem_key] += 5
                     else:
-                        planning_temp[(n, j)] = {"type": "Repos Lissage", "heures": 0}
+                        # Si déjà 40h, on ne peut plus ajouter d'heures. 
+                        # On marque "Repos" mais c'est un repos forcé par le quota légal.
+                        planning_temp[(n, j)] = {"type": "Repos", "heures": 0}
+
+                # --- CAS 3 : WEEK-END (FLEXIBILITÉ) ---
                 else:
-                    # Week-end : uniquement si < 35h
+                    # On travaille le WE seulement pour boucher le trou jusqu'à 35h-40h
                     if cur_h < 35:
-                        if h_disponibles >= 10:
-                            planning_temp[(n, j)] = {"type": "Week-end", "heures": 10}
-                            heures_hebdo[n][sem_key] += 10
-                        elif h_disponibles > 0:
-                            planning_temp[(n, j)] = {"type": "Week-end", "heures": 5}
-                            heures_hebdo[n][sem_key] += 5
-                        else:
-                            planning_temp[(n, j)] = {"type": "", "heures": 0}
+                        h_we = 10 if h_dispo >= 10 else 5
+                        planning_temp[(n, j)] = {"type": "Week-end", "heures": h_we}
+                        heures_hebdo[n][sem_key] += h_we
                     else:
+                        # Repos de week-end classique (Non listé sur le programme)
                         planning_temp[(n, j)] = {"type": "", "heures": 0}
-
-                # Enregistrement pour correction ultérieure
-                if n not in semaine_attributions:
-                    semaine_attributions[n] = {}
-                if sem_key not in semaine_attributions[n]:
-                    semaine_attributions[n][sem_key] = []
-                semaine_attributions[n][sem_key].append((j, planning_temp[(n, j)]["type"], planning_temp[(n, j)]["heures"]))
-
-    # --- PASSE 3 : CORRECTION POUR RESPECTER STRICTEMENT 40h ---
-    for n in semaine_attributions:
-        for sem_key, attribs in semaine_attributions[n].items():
-            total = sum(h for _, _, h in attribs)
-            if total > 40:
-                # Il faut réduire de (total - 40) heures
-                a_reduire = total - 40
-                # On identifie les attributions de type "Journée" (10h) qui ne sont pas des "reprises J+2"
-                # Pour simplifier, on considère que toute journée peut être réduite, mais on donne priorité à celles qui ne sont pas des reprises obligatoires.
-                # On récupère la liste des indices des attributions de 10h, avec un flag "reprise_obligatoire" (on ne peut pas déterminer facilement ici, donc on réduit d'abord celles qui ne sont pas marquées comme reprise)
-                # Pour implémenter proprement, il faudrait stocker plus d'info, mais on peut se contenter de réduire les journées normales en priorité.
-                # On trie les attributions de 10h en mettant en dernier celles qui sont des reprises J+2 (si on peut identifier)
-                # Comme on n'a pas conservé cette info, on va simplement réduire les dernières attributions de la semaine en priorité (moins critique)
-                # Une meilleure approche : on réduit en priorité les journées qui ne sont pas des "reprises J+2" (mais on n'a pas ce marqueur)
-                # On va simplifier en réduisant les journées qui ne sont pas suivies d'un repos obligatoire, etc.
-                # Pour cette version, on réduit simplement les journées dans l'ordre inverse de leur apparition (les plus récentes)
-                # Cela garantit que les reprises J+2 (qui sont souvent en début de semaine) sont conservées.
-                # On va collecter les indices des attributions de type "Journée"
-                indices_a_reduire = []
-                for idx, (j, typ, h) in enumerate(attribs):
-                    if typ == "Journée" and h == 10:
-                        indices_a_reduire.append(idx)
-                # On trie par ordre décroissant pour réduire les plus récentes d'abord
-                indices_a_reduire.sort(reverse=True)
-                for idx in indices_a_reduire:
-                    if a_reduire <= 0:
-                        break
-                    # On réduit cette journée de 10h à 5h
-                    j, typ, h = attribs[idx]
-                    attribs[idx] = (j, "Demi-journée", 5)
-                    a_reduire -= 5
-                    # Mettre à jour le planning_temp
-                    planning_temp[(n, j)] = {"type": "Demi-journée", "heures": 5}
-                # Si après avoir réduit toutes les journées il reste des heures à réduire (normalement non car a_reduire est multiple de 5)
-                # mais si a_reduire > 0, on réduit aussi des demi-journées (0h) ? Impossible car demi-journée = 5h, on ne peut pas réduire davantage.
-                # Dans ce cas, on devrait plutôt convertir des journées en repos (0h) mais cela briserait la reprise J+2. On suppose que a_reduire est toujours multiple de 5.
-            # Mettre à jour heures_hebdo avec les valeurs corrigées
-            new_total = sum(h for _, _, h in attribs)
-            heures_hebdo[n][sem_key] = new_total
-
-    # Mise à jour des persistances
-    st.session_state.last_index = index_rotation
-    derniere_semaine = f"Sem {date(annee, mois, jours_dans_mois).isocalendar()[1]}"
-    st.session_state.memoire_heures = {
-        n: heures_hebdo[n].get(derniere_semaine, 0)
-        for n in heures_hebdo
-    }
 
     return planning_temp, heures_hebdo
                             
