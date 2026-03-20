@@ -101,34 +101,46 @@ def sauvegarder_donnees():
 def calculer_planning(annee, mois, nb_equipes):
     import calendar
     from datetime import date
+
     jours_dans_mois = calendar.monthrange(annee, mois)[1]
     u_active = st.session_state.config.get('unite_active', 'Unité de Soins')
-    
+
     heures_hebdo = {}
     planning_temp = {}
     toutes_les_gardes = {}
-    index_rotation = st.session_state.get('last_index', 0) 
+    index_rotation = st.session_state.get('last_index', 0)
 
-    # --- PASSE 1 : ATTRIBUTION DES GARDES ---
+    # --- PASSE 1 : AFFECTATION DES GARDES (sans répétition d'équipe) ---
+    derniere_equipe_garde = None
     for j in range(1, jours_dans_mois + 1):
         dt = date(annee, mois, j)
-        decalage = 0
+        # On parcourt les équipes en commençant par l'index de rotation
+        # mais on exclut l'équipe qui était de garde la veille (si elle existe)
         trouve = False
-        while not trouve and decalage < nb_equipes:
+        for decalage in range(nb_equipes):
             test_id = ((index_rotation + decalage) % nb_equipes) + 1
+            # Si cette équipe est la même que celle de la veille, on saute
+            if derniere_equipe_garde is not None and test_id == derniere_equipe_garde:
+                continue
             membres_test = st.session_state.composition.get(f"{u_active}_{test_id}", [])
-            # Uniquement ceux qui ne sont pas en congé
-            presents = [n for n in membres_test if not any(c['agent'] == n and c['debut'] <= dt <= c['fin'] for c in st.session_state.conges)]
-            
+            # Vérifier qu'au moins un membre de l'équipe n'est pas en congé
+            presents = [n for n in membres_test if not any(
+                c['agent'] == n and c['debut'] <= dt <= c['fin']
+                for c in st.session_state.conges
+            )]
             if presents:
                 toutes_les_gardes[j] = test_id
+                derniere_equipe_garde = test_id
+                # Mise à jour de l'index de rotation pour le jour suivant
                 index_rotation = (test_id % nb_equipes)
                 trouve = True
-            else:
-                decalage += 1
-        if not trouve: toutes_les_gardes[j] = None
+                break
+        if not trouve:
+            # Si aucune équipe n'est disponible, on laisse None
+            toutes_les_gardes[j] = None
+            derniere_equipe_garde = None
 
-    # --- PASSE 2 : SERVICE ET LISSAGE "ZÉRO REPOS ORDINAIRE" ---
+    # --- PASSE 2 : DISTRIBUTION DES POSTES AVEC LISSAGE DYNAMIQUE ---
     for j in range(1, jours_dans_mois + 1):
         dt = date(annee, mois, j)
         sem_key = f"Sem {dt.isocalendar()[1]}"
@@ -138,52 +150,63 @@ def calculer_planning(annee, mois, nb_equipes):
         for e_id in range(1, nb_equipes + 1):
             membres = st.session_state.composition.get(f"{u_active}_{e_id}", [])
             for n in membres:
-                if n not in heures_hebdo: heures_hebdo[n] = {}
+                # Initialisation du compteur hebdomadaire
+                if n not in heures_hebdo:
+                    heures_hebdo[n] = {}
                 if sem_key not in heures_hebdo[n]:
-                    # Récupération du report (mémoire) uniquement en début de mois
                     report = st.session_state.get('memoire_heures', {}).get(n, 0)
                     heures_hebdo[n][sem_key] = report if j <= 7 else 0
 
                 cur_h = heures_hebdo[n][sem_key]
-                h_dispo = 40 - cur_h
+                h_disponibles = 40 - cur_h
 
-                # --- CAS 1 : PRIORITÉS ABSOLUES ---
-                # Congé
+                # --- Hiérarchie des priorités ---
+                # 1. Congé
                 if any(c['agent'] == n and c['debut'] <= dt <= c['fin'] for c in st.session_state.conges):
                     planning_temp[(n, j)] = {"type": "Congé", "heures": 0}
                     continue
-                # Garde (0h dans le quota 40h)
-                if e_id == id_equipe_de_garde:
-                    planning_temp[(n, j)] = {"type": "Garde", "heures": 0}
-                    continue
-                # Repos J+1 (Obligatoire après garde)
-                if planning_temp.get((n, j-1), {}).get("type") == "Garde":
+
+                # 2. Repos obligatoire après une garde (J+1)
+                jour_prec = planning_temp.get((n, j-1))
+                if jour_prec and jour_prec.get("type") == "Garde":
                     planning_temp[(n, j)] = {"type": "Repos", "heures": 0}
                     continue
 
-                # --- CAS 2 : JOURS DE SEMAINE (SERVICE OBLIGATOIRE) ---
+                # 3. Garde (uniquement si l'agent est dans l'équipe désignée)
+                if e_id == id_equipe_de_garde:
+                    planning_temp[(n, j)] = {"type": "Garde", "heures": 0}
+                    continue
+
+                # 4. Service normal (semaine ou week-end)
                 if not is_we:
-                    if h_dispo >= 10:
+                    # Jour ouvrable : on travaille tant qu'il reste des heures
+                    if h_disponibles >= 10:
                         planning_temp[(n, j)] = {"type": "Journée", "heures": 10}
                         heures_hebdo[n][sem_key] += 10
-                    elif h_dispo >= 5:
+                    elif h_disponibles > 0:
                         planning_temp[(n, j)] = {"type": "Demi-journée", "heures": 5}
                         heures_hebdo[n][sem_key] += 5
                     else:
-                        # Si déjà 40h, on ne peut plus ajouter d'heures. 
-                        # On marque "Repos" mais c'est un repos forcé par le quota légal.
-                        planning_temp[(n, j)] = {"type": "Repos", "heures": 0}
-
-                # --- CAS 3 : WEEK-END (FLEXIBILITÉ) ---
+                        planning_temp[(n, j)] = {"type": "Repos Lissage", "heures": 0}
                 else:
-                    # On travaille le WE seulement pour boucher le trou jusqu'à 35h-40h
+                    # Week-end : seulement si le total de la semaine est < 35h
                     if cur_h < 35:
-                        h_we = 10 if h_dispo >= 10 else 5
-                        planning_temp[(n, j)] = {"type": "Week-end", "heures": h_we}
-                        heures_hebdo[n][sem_key] += h_we
+                        if h_disponibles >= 10:
+                            planning_temp[(n, j)] = {"type": "Week-end", "heures": 10}
+                            heures_hebdo[n][sem_key] += 10
+                        elif h_disponibles > 0:
+                            planning_temp[(n, j)] = {"type": "Week-end", "heures": 5}
+                            heures_hebdo[n][sem_key] += 5
+                        else:
+                            planning_temp[(n, j)] = {"type": "", "heures": 0}
                     else:
-                        # Repos de week-end classique (Non listé sur le programme)
                         planning_temp[(n, j)] = {"type": "", "heures": 0}
+
+    # Mise à jour de l'index pour le mois suivant (idempotence)
+    st.session_state.last_index = index_rotation
+    # Optionnel : sauvegarder les heures reportées
+    st.session_state.memoire_heures = {n: heures_hebdo[n].get(f"Sem {date(annee, mois, jours_dans_mois).isocalendar()[1]}", 0)
+                                       for n in heures_hebdo}
 
     return planning_temp, heures_hebdo
                             
