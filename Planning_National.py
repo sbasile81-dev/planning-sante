@@ -110,31 +110,7 @@ def calculer_planning(annee, mois, nb_equipes):
     index_rotation = 0
     toutes_les_gardes = {} 
 
-    # PASSE 1 : CALCUL DE LA ROTATION (Inviolable & Glissante)
-    for j in range(1, jours_dans_mois + 1):
-        dt = date(annee, mois, j)
-        decalage = 0
-        trouve = False
-        
-        while not trouve:
-            test_idx = (index_rotation + decalage) % nb_equipes
-            test_id = test_idx + 1
-            membres_test = st.session_state.composition.get(f"{u_active}_{test_id}", [])
-            
-            # Vérifier si au moins une personne est disponible (Anti-trou noir)
-            presents = [n for n in membres_test if not any(c['agent'] == n and c['debut'] <= dt <= c['fin'] for c in st.session_state.conges)]
-            
-            if presents:
-                toutes_les_gardes[j] = test_id
-                index_rotation = (test_idx + 1) % nb_equipes # On avance l'index seulement si l'équipe est là
-                trouve = True
-            else:
-                decalage += 1 # On cherche l'équipe suivante sans consommer le tour de l'absente
-                if decalage >= nb_equipes:
-                    toutes_les_gardes[j] = None # Cas extrême : personne n'est disponible
-                    trouve = True
-
-    # PASSE 2 : ATTRIBUTION ET LISSAGE PAR PALIERS DE 5H
+# --- PASSE 2 : ATTRIBUTION DES TÂCHES ET LISSAGE PROFESSIONNEL (V10.1) ---
     for j in range(1, jours_dans_mois + 1):
         dt = date(annee, mois, j)
         sem_key = f"Semaine {dt.isocalendar()[1]}"
@@ -144,56 +120,65 @@ def calculer_planning(annee, mois, nb_equipes):
         for e_id in range(1, nb_equipes + 1):
             membres = st.session_state.composition.get(f"{u_active}_{e_id}", [])
             for n in membres:
-                # Initialisation des heures hebdo avec mémoire du mois précédent
-                if n not in heures_hebdo: heures_hebdo[n] = {}
+                # 0. Initialisation et récupération de la mémoire (Semaines à cheval)
+                if n not in heures_hebdo: 
+                    heures_hebdo[n] = {}
                 if sem_key not in heures_hebdo[n]:
-                    # On récupère le reliquat de la semaine à cheval sur le mois dernier
+                    # On récupère le reliquat du mois précédent si existant
                     report = st.session_state.get('memoire_heures', {}).get(n, 0)
-                    heures_hebdo[n][sem_key] = report
+                    heures_hebdo[n][sem_key] = report if j <= 7 else 0
 
-                # 1. CONGÉ (0h)
+                current_h = heures_hebdo[n][sem_key]
+
+                # 1. PRIORITÉ ABSOLUE : LES CONGÉS (0h)
                 if any(c['agent'] == n and c['debut'] <= dt <= c['fin'] for c in st.session_state.conges):
                     planning_temp[(n, j)] = {"type": "Congé", "heures": 0}
                     continue
 
-                # 2. GARDE J (0h payante)
+                # 2. PRIORITÉ 2 : LA GARDE (0h - Payante hors quota)
                 if e_id == id_g_reel:
                     planning_temp[(n, j)] = {"type": "Garde", "heures": 0}
+                    # On ne rajoute pas d'heures au compteur 35-40h
                     continue
 
-                # 3. REPOS J+1 (0h obligatoire)
+                # 3. PRIORITÉ 3 : LE REPOS J+1 (0h - Suite de garde)
+                # On vérifie si l'agent était de garde la veille
                 if planning_temp.get((n, j-1), {}).get("type") == "Garde":
                     planning_temp[(n, j)] = {"type": "Repos", "heures": 0}
                     continue
 
-                # 4. REPRISE J+2 ET SERVICE NORMAL
-                # On calcule combien de place il reste dans le quota de 40h
-                h_actuelles = heures_hebdo[n][sem_key]
-                h_restantes = 40 - h_actuelles
-                
-                # Détermination du type de journée (J+2 Prioritaire)
-                est_reprise = planning_temp.get((n, j-2), {}).get("type") == "Garde"
-                
+                # 4. PRIORITÉ 4 : LA REPRISE J+2 (10h - VERROU OBLIGATOIRE)
+                # On vérifie si l'agent était de garde l'avant-veille
+                if planning_temp.get((n, j-2), {}).get("type") == "Garde":
+                    # On vérifie quand même le plafond de 40h par sécurité
+                    h_reprise = 10 if current_h + 10 <= 40 else 5
+                    planning_temp[(n, j)] = {"type": "Journée", "heures": h_reprise}
+                    heures_hebdo[n][sem_key] += h_reprise
+                    continue
+
+                # 5. LISSAGE DES AUTRES JOURS (JOURNÉES ET WEEK-ENDS)
                 if is_we:
-                    # Logique Week-end (Dette pour atteindre 35h-40h)
-                    if h_actuelles < 35:
-                        h_a_faire = min(10, 40 - h_actuelles) 
-                        # On s'assure que c'est un multiple de 5
-                        h_a_faire = (h_a_faire // 5) * 5
+                    # Logique Week-end : Uniquement pour atteindre le palier 35h ou 40h
+                    if current_h < 35:
+                        # On complète au maximum possible (multiple de 5)
+                        h_a_faire = min(10, 40 - current_h)
+                        h_a_faire = (h_a_faire // 5) * 5 # Sécurité multiple de 5
                         planning_temp[(n, j)] = {"type": "Week-end", "heures": h_a_faire}
                         heures_hebdo[n][sem_key] += h_a_faire
                     else:
                         planning_temp[(n, j)] = {"type": "", "heures": 0}
+                
                 else:
-                    # Logique Semaine (Lissage par paliers)
+                    # Logique Semaine : On remplit les journées ordinaires
+                    h_restantes = 40 - current_h
                     if h_restantes >= 10:
-                        planning_temp[(n, j)] = {"type": "Reprise" if est_reprise else "Journée", "heures": 10}
+                        planning_temp[(n, j)] = {"type": "Journée", "heures": 10}
                         heures_hebdo[n][sem_key] += 10
                     elif h_restantes == 5:
                         planning_temp[(n, j)] = {"type": "Demi-journée", "heures": 5}
                         heures_hebdo[n][sem_key] += 5
                     else:
-                        # Quota 40h atteint
+                        # Quota 40h déjà atteint par les reprises ou journées précédentes
                         planning_temp[(n, j)] = {"type": "Repos Lissage", "heures": 0}
                             
     # Enregistrement pour le mois suivant
