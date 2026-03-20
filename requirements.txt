@@ -1,1 +1,4 @@
-dvd 
+streamlit
+supabase
+pandas
+python-docx
