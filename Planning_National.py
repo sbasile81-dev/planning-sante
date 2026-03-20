@@ -116,92 +116,32 @@ def calculer_planning(annee, mois, nb_equipes):
     toutes_les_gardes = {}
     index_rotation = st.session_state.get('last_index', 0) # On repart du dernier index connu
 
-    # =========================================================
-    # PASSE 1 : DETERMINATION DES GARDES (LA STRUCTURE)
-    # =========================================================
-    for j in range(1, jours_dans_mois + 1):
-        dt = date(annee, mois, j)
-        decalage = 0
-        trouve = False
-        
-        while not trouve and decalage < nb_equipes:
-            test_idx = (index_rotation + decalage) % nb_equipes
-            test_id = test_idx + 1
-            membres_test = st.session_state.composition.get(f"{u_active}_{test_id}", [])
-            
-            # Vérifier la présence réelle (Anti-trou noir SENI)
-            presents = [n for n in membres_test if not any(c['agent'] == n and c['debut'] <= dt <= c['fin'] for c in st.session_state.conges)]
-            
-            if presents:
-                toutes_les_gardes[j] = test_id
-                index_rotation = (test_idx + 1) % nb_equipes
-                trouve = True
-            else:
-                decalage += 1
-        
-        if not trouve: toutes_les_gardes[j] = None
-
-    # =========================================================
-    # PASSE 2 : DISTRIBUTION ET LISSAGE (L'INTELLIGENCE)
-    # =========================================================
-    for j in range(1, jours_dans_mois + 1):
-        dt = date(annee, mois, j)
-        sem_key = f"Sem {dt.isocalendar()[1]}"
-        is_we = dt.weekday() >= 5
-        id_equipe_de_garde = toutes_les_gardes.get(j)
-
-        for e_id in range(1, nb_equipes + 1):
-            membres = st.session_state.composition.get(f"{u_active}_{e_id}", [])
-            for n in membres:
-                # Init compteur
-                if n not in heures_hebdo: heures_hebdo[n] = {}
-                if sem_key not in heures_hebdo[n]:
-                    heures_hebdo[n][sem_key] = st.session_state.get('memoire_heures', {}).get(n, 0) if j <= 7 else 0
-
-                cur_h = heures_hebdo[n][sem_key]
-
-                # --- RÈGLE 1 : CONGÉ ---
-                if any(c['agent'] == n and c['debut'] <= dt <= c['fin'] for c in st.session_state.conges):
-                    planning_temp[(n, j)] = {"type": "Congé", "heures": 0}
-                    continue
-
-                # --- RÈGLE 2 : GARDE (0h) ---
-                if e_id == id_equipe_de_garde:
-                    planning_temp[(n, j)] = {"type": "Garde", "heures": 0}
-                    continue
-
-                # --- RÈGLE 3 : REPOS J+1 (0h) ---
-                # On vérifie la garde de la VEILLE (j-1)
-                if planning_temp.get((n, j-1), {}).get("type") == "Garde":
-                    planning_temp[(n, j)] = {"type": "Repos", "heures": 0}
-                    continue
-
-                # --- RÈGLE 4 : REPRISE J+2 (10h) ---
-                # On vérifie la garde d'AVANT-HIER (j-2)
-                if planning_temp.get((n, j-2), {}).get("type") == "Garde":
-                    h_add = 10 if cur_h + 10 <= 40 else 5
-                    planning_temp[(n, j)] = {"type": "Journée", "heures": h_add}
-                    heures_hebdo[n][sem_key] += h_add
-                    continue
-
-                # --- RÈGLE 5 : LISSAGE SEMAINE ET WEEK-END ---
+# --- RÈGLE 5 : LISSAGE SEMAINE ET WEEK-END (CORRIGÉ V11) ---
                 if is_we:
+                    # Logique Week-end : On complète pour atteindre 35h-40h
                     if cur_h < 35:
-                        h_we = min(10, 40 - cur_h)
-                        h_we = (h_we // 5) * 5
+                        # On essaie de donner 10h si possible, sinon 5h
+                        h_we = 10 if cur_h + 10 <= 40 else 5
                         planning_temp[(n, j)] = {"type": "Week-end", "heures": h_we}
                         heures_hebdo[n][sem_key] += h_we
                     else:
                         planning_temp[(n, j)] = {"type": "", "heures": 0}
+                
                 else:
-                    # Jours normaux
+                    # JOURS DE SEMAINE : L'intelligence de lissage par 5h
                     if cur_h + 10 <= 40:
+                        # Cas idéal : On a la place pour une journée complète
                         planning_temp[(n, j)] = {"type": "Journée", "heures": 10}
                         heures_hebdo[n][sem_key] += 10
+                    
                     elif cur_h + 5 <= 40:
+                        # Cas d'ajustement : On n'a plus que 5h de budget
                         planning_temp[(n, j)] = {"type": "Demi-journée", "heures": 5}
                         heures_hebdo[n][sem_key] += 5
+                        # NOTE : C'est ici que tes colonnes "Demi-journée" vont se remplir !
+                    
                     else:
+                        # Cas de saturation : On est déjà à 40h
                         planning_temp[(n, j)] = {"type": "Repos Lissage", "heures": 0}
                             
     # Enregistrement pour le mois suivant
