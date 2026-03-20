@@ -106,67 +106,73 @@ def calculer_planning(annee, mois, nb_equipes):
     date_prec = date(annee, mois, 1) - timedelta(days=1)
     cle_prec = f"{date_prec.year}_{date_prec.month}"
 
+# --- LOGIQUE DE ROTATION DYNAMIQUE (VERSION PRO V6.0) ---
+    # On commence avec l'index 0 (Équipe 1)
+    index_rotation = 0
+    
     for j in range(1, jours_dans_mois + 1):
         dt = date(annee, mois, j)
         sem_key = f"Semaine {dt.isocalendar()[1]}"
         is_we = dt.weekday() >= 5
         
-        # 1. LOGIQUE ANTI-TROU NOIR : Trouver l'équipe de garde réelle
-        id_g_theorique = ((j - 1) % nb_equipes) + 1
+        # 1. IDENTIFICATION DE L'ÉQUIPE DE GARDE PAR ROTATION GLISSANTE
         id_g_reel = None
+        tentatives = 0
         
-        # On teste les équipes pour trouver celle qui n'est pas totalement en congé
-        for offset in range(nb_equipes):
-            test_id = ((id_g_theorique - 1 + offset) % nb_equipes) + 1
+        # On cherche l'équipe suivante disponible dans l'ordre
+        while tentatives < nb_equipes:
+            # Calcul de l'ID de l'équipe à tester (1 à nb_equipes)
+            test_id = (index_rotation % nb_equipes) + 1
             membres_test = st.session_state.composition.get(f"{u_active}_{test_id}", [])
             
-            # Une équipe est valide si elle a au moins un agent présent
+            # Vérifier si au moins un membre de cette équipe est PRÉSENT aujourd'hui
             presents = [n for n in membres_test if not any(c['agent'] == n and c['debut'] <= dt <= c['fin'] for c in st.session_state.conges)]
             
             if presents:
+                # Équipe trouvée ! On l'assigne et on avance l'index pour demain
                 id_g_reel = test_id
+                index_rotation += 1
                 break
-        
-        # 2. ATTRIBUTION POUR CHAQUE AGENT DANS CHAQUE ÉQUIPE
+            else:
+                # Équipe en congé (ex: SENI seul), on passe à la suivante sans incrémenter le jour
+                index_rotation += 1
+                tentatives += 1
+
+        # 2. ATTRIBUTION POUR CHAQUE AGENT
         for e_id in range(1, nb_equipes + 1):
             membres = st.session_state.composition.get(f"{u_active}_{e_id}", [])
-            
             for n in membres:
-                # Initialisation des heures pour l'agent
                 if n not in heures_hebdo: 
                     heures_hebdo[n] = {}
                 if sem_key not in heures_hebdo[n]:
                     report = st.session_state.get('memoire_heures', {}).get(cle_prec, {}).get(n, 0)
                     heures_hebdo[n][sem_key] = report if j <= 7 else 0
 
-                # --- ORDRE DES PRIORITÉS ---
-                
-                # PRIORITÉ 1 : CONGÉ
+                # Cas A : L'agent est en CONGÉ
                 if any(c['agent'] == n and c['debut'] <= dt <= c['fin'] for c in st.session_state.conges):
                     planning_temp[(n, j)] = {"type": "Congé", "heures": 0}
                 
-                # PRIORITÉ 2 : GARDE (Si l'équipe a été choisie par la logique anti-trou noir)
+                # Cas B : L'agent est de GARDE (id_g_reel trouvé plus haut)
                 elif e_id == id_g_reel:
                     planning_temp[(n, j)] = {"type": "Garde", "heures": 0}
                 
-                # PRIORITÉ 3 : REPOS (Si l'agent était de garde la veille)
+                # Cas C : L'agent est en REPOS (si garde hier)
                 elif j > 1 and planning_temp.get((n, j-1), {}).get("type") == "Garde":
                     planning_temp[(n, j)] = {"type": "Repos", "heures": 0}
                 
-                # PRIORITÉ 4 : SERVICE NORMAL (Journée ou Week-end)
+                # Cas D : Service normal
                 else:
                     if is_we:
-                        # Reprise J+3
+                        # On garde ta logique de lissage/reprise pour le week-end
                         id_reprise = ((j - 3) % nb_equipes) + 1
                         if e_id == id_reprise or heures_hebdo[n][sem_key] < 35:
                             planning_temp[(n, j)] = {"type": "Week-end", "heures": 5}
                             heures_hebdo[n][sem_key] += 5
                         else:
-                            planning_temp[(n, j)] = {"type": "", "heures": 0} # Libre
+                            planning_temp[(n, j)] = {"type": "", "heures": 0}
                     else:
                         planning_temp[(n, j)] = {"type": "Journée", "heures": 10}
                         heures_hebdo[n][sem_key] += 10
-
     # Lissage (Identique mais sauvegarde la fin de mois)
     for n, semaines in heures_hebdo.items():
          for sem_key, total in semaines.items():
@@ -363,4 +369,5 @@ with t5:
                 if n:
                     st.session_state.base_agents.append({"nom":n,"emploi":e,"matricule":m})
                     sauvegarder_donnees(); st.rerun()
+
 
