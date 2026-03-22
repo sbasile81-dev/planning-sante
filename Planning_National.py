@@ -19,23 +19,6 @@ SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 # Initialisation du client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# --- INITIALISATION DU SESSION STATE ---
-if 'config' not in st.session_state:
-    donnees_initiales = charger_donnees()
-    if donnees_initiales:
-        st.session_state.config = donnees_initiales['config']
-        st.session_state.composition = donnees_initiales['composition']
-        st.session_state.conges = donnees_initiales['conges']
-        st.session_state.liste_unites = donnees_initiales['liste_unites']
-        st.session_state.base_agents = donnees_initiales['base_agents']
-    else:
-        # Valeurs de secours si Supabase est vide ou inaccessible
-        st.session_state.config = {"region": "Centre-Ouest", "unite_active": "Unité de Soins"}
-        st.session_state.composition = {}
-        st.session_state.conges = []
-        st.session_state.liste_unites = ["Unité de Soins"]
-        st.session_state.base_agents = []
-
 MOIS_FR = {
     1: "JANVIER", 2: "FÉVRIER", 3: "MARS", 4: "AVRIL", 
     5: "MAI", 6: "JUIN", 7: "JUILLET", 8: "AOÛT", 
@@ -111,6 +94,23 @@ def sauvegarder_donnees():
         
     except Exception as e:
         st.error(f"Erreur de sauvegarde Cloud : {e}")
+
+# --- INITIALISATION DU SESSION STATE ---
+if 'config' not in st.session_state:
+    donnees_initiales = charger_donnees()
+    if donnees_initiales:
+        st.session_state.config = donnees_initiales['config']
+        st.session_state.composition = donnees_initiales['composition']
+        st.session_state.conges = donnees_initiales['conges']
+        st.session_state.liste_unites = donnees_initiales['liste_unites']
+        st.session_state.base_agents = donnees_initiales['base_agents']
+    else:
+        # Valeurs de secours si Supabase est vide ou inaccessible
+        st.session_state.config = {"region": "Centre-Ouest", "unite_active": "Unité de Soins"}
+        st.session_state.composition = {}
+        st.session_state.conges = []
+        st.session_state.liste_unites = ["Unité de Soins"]
+        st.session_state.base_agents = []
 
 # =========================================================
 # 3...ALGORITHME DE PLANNING NATIONAL SANTÉ - VERSION FINALE (CORRIGÉE V13)
