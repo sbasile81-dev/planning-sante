@@ -95,22 +95,30 @@ def sauvegarder_donnees():
     except Exception as e:
         st.error(f"Erreur de sauvegarde Cloud : {e}")
 
-# --- INITIALISATION DU SESSION STATE ---
-if 'config' not in st.session_state:
+# --- INITIALISATION DU SESSION STATE (VERSION SÉCURISÉE) ---
+if 'initialise' not in st.session_state:
     donnees_initiales = charger_donnees()
+    
+    # On prépare les structures par défaut
+    config_defaut = {"region": "Centre-Ouest", "unite_active": "Unité de Soins"}
+    
     if donnees_initiales:
-        st.session_state.config = donnees_initiales['config']
-        st.session_state.composition = donnees_initiales['composition']
-        st.session_state.conges = donnees_initiales['conges']
-        st.session_state.liste_unites = donnees_initiales['liste_unites']
-        st.session_state.base_agents = donnees_initiales['base_agents']
+        # On utilise .get() pour éviter les erreurs si une clé manque dans Supabase
+        st.session_state.config = donnees_initiales.get('config', config_defaut)
+        st.session_state.composition = donnees_initiales.get('composition', {})
+        st.session_state.conges = donnees_initiales.get('conges', [])
+        st.session_state.liste_unites = donnees_initiales.get('liste_unites', ["Unité de Soins"])
+        st.session_state.base_agents = donnees_initiales.get('base_agents', [])
     else:
         # Valeurs de secours si Supabase est vide ou inaccessible
-        st.session_state.config = {"region": "Centre-Ouest", "unite_active": "Unité de Soins"}
+        st.session_state.config = config_defaut
         st.session_state.composition = {}
         st.session_state.conges = []
         st.session_state.liste_unites = ["Unité de Soins"]
         st.session_state.base_agents = []
+    
+    # CRITIQUE : On marque l'initialisation comme terminée
+    st.session_state.initialise = True
 
 # =========================================================
 # 3...ALGORITHME DE PLANNING NATIONAL SANTÉ - VERSION FINALE (CORRIGÉE V13)
